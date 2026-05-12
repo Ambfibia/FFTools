@@ -1,0 +1,9 @@
+/logs
+/work
+/builds
+/fonts
+
+**/bin/
+**/obj/
+**/__pycache__/
+*.pyc

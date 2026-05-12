@@ -1,0 +1,9 @@
+[submodule "UnityPackFF"]
+	path = UnityPackFF
+	url = https://github.com/dongresource/UnityPackFF
+	branch = master
+
+[submodule "ffbuildtool"]
+	path = ffbuildtool
+	url = https://github.com/OpenFusionProject/ffbuildtool
+	branch = main
