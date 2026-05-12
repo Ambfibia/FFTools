@@ -1,5 +1,7 @@
 # FFTools
 
+[Русская версия README](README.ru.md)
+
 FFTools is a Windows toolchain for creating and applying Russian localization patches for the FusionFall beta client.
 
 The normal workflow is:
@@ -182,4 +184,3 @@ Useful options:
 30_ff_patch_tool.bat build --source builds\beta-20100104 --patch-dir builds\beta-20100104-ru-patch --output builds\beta-20100104-ru --force
 30_ff_patch_tool.bat build --source builds\beta-20100104 --no-unity-assets --no-table-data --force
 ```
-
