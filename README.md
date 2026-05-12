@@ -183,32 +183,3 @@ Useful options:
 30_ff_patch_tool.bat build --source builds\beta-20100104 --no-unity-assets --no-table-data --force
 ```
 
-## Export And Build Scripts
-
-Legacy wrappers are still available:
-
-```bat
-10_export_ru_translation_beta20100104.bat
-20_build_ru_beta20100104.bat -Force
-```
-
-`10_export_ru_translation_beta20100104.bat` exports by default:
-
-- UI strings from DLL `ldstr` instructions only.
-- Unity asset strings from `main.unity3d`.
-- Object strings from `TableData.resourceFile`.
-
-It does not enable full DLL string export unless `-AllDllStrings` is passed.
-
-## Generated Files
-
-Do not commit generated client data or local patch outputs:
-
-- `builds\`
-- `work\`
-- `logs\`
-- root-level `fonts\`
-- `bin\`
-- `obj\`
-
-These are ignored by `.gitignore`.
