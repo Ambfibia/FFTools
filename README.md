@@ -189,3 +189,33 @@ Useful options:
 30_ff_patch_tool.bat build --source builds\beta-20100104 --patch-dir builds\beta-20100104-ru-patch --output builds\beta-20100104-ru --force
 30_ff_patch_tool.bat build --source builds\beta-20100104 --no-unity-assets --no-table-data --force
 ```
+
+## Translator JSON
+
+To give a translator a compact file with only the original text and translation fields:
+
+```bat
+33_export_translator_json.bat
+```
+
+This reads `builds\retro-010920-ru-patch\translation.json` and writes:
+
+```text
+builds\retro-010920-ru-patch\translation.translator.json
+```
+
+After editing `translation.translator.json`, merge the translations back into the full patch JSON:
+
+```bat
+34_import_translator_json.bat
+```
+
+Both wrappers also accept explicit paths:
+
+```bat
+33_export_translator_json.bat builds\my-patch\translation.json builds\my-patch\translation.translator.json
+34_import_translator_json.bat builds\my-patch\translation.json builds\my-patch\translation.translator.json
+```
+
+The compact file intentionally contains only `source` and `translation`.
+Keep the `entries` order unchanged; the import step validates each `source` row before writing translations back.
