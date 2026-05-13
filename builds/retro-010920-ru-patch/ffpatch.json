@@ -1,0 +1,14 @@
+{
+  "Format": "fftools.patch.v1",
+  "Source": "D:\\CodexProject\\FFTools\\builds\\retro-010920",
+  "TranslationJson": "translation.json",
+  "ManualMergeJson": "manual.json",
+  "FontTtf": null,
+  "FontFace": null,
+  "IncludeUnityAssets": true,
+  "IncludeTableData": true,
+  "PatchUnityAssets": true,
+  "PatchTableData": true,
+  "AssetUrl": "http://127.0.0.1:8000",
+  "OutputName": "retro-010920-ru"
+}

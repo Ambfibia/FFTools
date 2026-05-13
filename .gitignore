@@ -5,3 +5,4 @@
 **/obj/
 **/__pycache__/
 *.pyc
+/builds/retro-010920-ru
