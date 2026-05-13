@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Patch FusionFall GUI bitmap fonts for Cyrillic glyph coverage."""
+"""Patch FusionFall GUI bitmap fonts from replacement TTF files."""
 
 from __future__ import annotations
 
@@ -31,6 +31,14 @@ RUSSIAN_CODES = (
     + list(range(0x430, 0x450))
     + [0x451]
 )
+ASCII_CODES = list(range(0x20, 0x7F))
+CP1251_RUSSIAN_ALIASES = {
+    **{0xC0 + index: 0x410 + index for index in range(0x20)},
+    **{0xE0 + index: 0x430 + index for index in range(0x20)},
+    0xA8: 0x401,
+    0xB8: 0x451,
+}
+DEFAULT_TTF_PATCH_CODES = ASCII_CODES + RUSSIAN_CODES + sorted(CP1251_RUSSIAN_ALIASES)
 
 
 MANUAL_FONT_FALLBACKS = {
@@ -63,6 +71,7 @@ def build_ttf_font_map(font_dir: Path | None) -> dict[str, Path]:
 
 class GlyphBitmap(NamedTuple):
     code: int
+    render_code: int
     width: int
     height: int
     origin_x: int
@@ -281,7 +290,7 @@ class GdiFontRenderer:
         height = int(metrics.gmBlackBoxY)
         advance = max(0, int(metrics.gmCellIncX))
         if width == 0 or height == 0:
-            return GlyphBitmap(code, 0, 0, 0, 0, advance, [])
+            return GlyphBitmap(code, code, 0, 0, 0, 0, advance, [])
 
         buffer = (ctypes.c_ubyte * size)()
         rendered = self.gdi32.GetGlyphOutlineW(
@@ -297,12 +306,17 @@ class GdiFontRenderer:
             return None
 
         stride = (width + 3) & ~3
+        available = int(rendered)
         rows: list[bytes] = []
         for y in range(height):
-            row = bytes(min(255, int(buffer[y * stride + x]) * 4) for x in range(width))
+            row = bytes(
+                min(255, int(buffer[y * stride + x]) * 4) if y * stride + x < available else 0
+                for x in range(width)
+            )
             rows.append(row)
 
         return GlyphBitmap(
+            code,
             code,
             width,
             height,
@@ -311,6 +325,12 @@ class GdiFontRenderer:
             advance,
             rows,
         )
+
+    def render_glyph_alias(self, code: int, render_code: int) -> GlyphBitmap | None:
+        glyph = self.render_glyph(render_code)
+        if glyph is None:
+            return None
+        return GlyphBitmap(code, render_code, glyph.width, glyph.height, glyph.origin_x, glyph.origin_y, glyph.advance, glyph.alpha_rows)
 
 
 def font_has_cyrillic(font: dict[str, Any]) -> bool:
@@ -440,41 +460,62 @@ def patch_font_with_ttf(
     logical = texture_to_logical_alpha(texture)
 
     existing_rects = font.get("m_CharacterRects", [])
-    existing_codes = {int(rect["index"]) for rect in existing_rects}
-    missing_codes = [code for code in RUSSIAN_CODES if code not in existing_codes]
-    if not missing_codes:
-        return {
-            "font_path_id": font_path_id,
-            "font_name": font.get("m_Name", ""),
-            "texture_path_id": texture_pointer.path_id,
-            "old_texture_size": [old_width, old_height],
-            "new_texture_size": [old_width, old_height],
-            "added_codes": [],
-            "skipped": "already_has_cyrillic",
-        }
+    patch_codes = DEFAULT_TTF_PATCH_CODES
+    patch_code_set = set(patch_codes)
+    existing_rect_by_code = {int(rect["index"]): rect for rect in existing_rects}
+    existing_codes = set(existing_rect_by_code)
 
     line_spacing = float(font.get("m_LineSpacing") or 16.0)
     pixel_height = max(1, int(round(line_spacing * size_scale)))
     with GdiFontRenderer(ttf_path, face_name, pixel_height) as renderer:
         glyphs = []
-        for code in missing_codes:
-            glyph = renderer.render_glyph(code)
+        for code in patch_codes:
+            render_code = CP1251_RUSSIAN_ALIASES.get(code, code)
+            glyph = renderer.render_glyph_alias(code, render_code) if render_code != code else renderer.render_glyph(code)
             if glyph is not None:
                 glyphs.append(glyph)
 
     if not glyphs:
-        raise ValueError("No Cyrillic glyphs could be rendered from the supplied TTF.")
+        raise ValueError("No glyphs could be rendered from the supplied TTF.")
 
-    existing_positions = [rect_pixels(rect, old_width, old_height) for rect in existing_rects]
+    existing_positions_by_code = {
+        int(rect["index"]): rect_pixels(rect, old_width, old_height)
+        for rect in existing_rects
+    }
+    kept_rects = [
+        rect
+        for rect in existing_rects
+        if int(rect["index"]) not in patch_code_set
+    ]
+    kept_positions = [
+        existing_positions_by_code[int(rect["index"])]
+        for rect in kept_rects
+    ]
+
+    reused_positions: dict[int, tuple[int, int]] = {}
+    glyphs_to_pack: list[GlyphBitmap] = []
+    for glyph in glyphs:
+        old_rect = existing_rect_by_code.get(glyph.code)
+        if old_rect is None:
+            glyphs_to_pack.append(glyph)
+            continue
+
+        old_x, old_y, old_w, old_h = existing_positions_by_code[glyph.code]
+        if glyph.width <= old_w and glyph.height <= old_h:
+            reused_positions[glyph.code] = (old_x, old_y)
+        else:
+            glyphs_to_pack.append(glyph)
+
+    occupied_positions = list(existing_positions_by_code.values())
     start_y = padding
-    if existing_positions:
-        start_y = max(y + h + padding for _x, y, _w, h in existing_positions)
+    if occupied_positions:
+        start_y = max(y + h + padding for _x, y, _w, h in occupied_positions)
 
     atlas_width = next_power_of_two(max(old_width, 64))
     atlas_height = next_power_of_two(max(old_height, start_y + padding + 1))
     packed: dict[int, tuple[int, int]] | None = None
     while atlas_width <= max_texture_size and atlas_height <= max_texture_size:
-        packed = try_pack_glyphs(glyphs, start_y, atlas_width, atlas_height, padding)
+        packed = try_pack_glyphs(glyphs_to_pack, start_y, atlas_width, atlas_height, padding)
         if packed is not None:
             break
         if atlas_height <= atlas_width:
@@ -484,7 +525,7 @@ def patch_font_with_ttf(
 
     if packed is None:
         raise ValueError(
-            f"Could not pack {len(glyphs)} glyphs into a {max_texture_size}x{max_texture_size} texture."
+            f"Could not pack {len(glyphs_to_pack)} glyphs into a {max_texture_size}x{max_texture_size} texture."
         )
 
     new_logical = bytearray(atlas_width * atlas_height)
@@ -493,16 +534,26 @@ def patch_font_with_ttf(
         target = y * atlas_width
         new_logical[target:target + old_width] = logical[source:source + old_width]
 
-    for rect, (x, y, width, height) in zip(existing_rects, existing_positions):
+    for rect, (x, y, width, height) in zip(kept_rects, kept_positions):
         set_rect_uv(rect, x, y, width, height, atlas_width, atlas_height)
 
-    added_rects = []
+    patched_rects = []
     for glyph in glyphs:
-        x, y = packed[glyph.code]
+        if glyph.code in reused_positions:
+            x, y = reused_positions[glyph.code]
+        else:
+            x, y = packed[glyph.code]
+        old_position = existing_positions_by_code.get(glyph.code)
+        if old_position is not None:
+            old_x, old_y, old_w, old_h = old_position
+            for clear_y in range(old_y, min(old_y + old_h, atlas_height)):
+                target = clear_y * atlas_width + old_x
+                clear_width = min(old_w, atlas_width - old_x)
+                new_logical[target:target + clear_width] = b"\0" * clear_width
         for row_index, row in enumerate(glyph.alpha_rows):
             target = (y + row_index) * atlas_width + x
             new_logical[target:target + glyph.width] = row
-        added_rects.append(
+        patched_rects.append(
             make_character_rect(
                 glyph.code,
                 glyph,
@@ -515,7 +566,7 @@ def patch_font_with_ttf(
         )
 
     font["m_CharacterRects"] = sorted(
-        list(existing_rects) + added_rects,
+        kept_rects + patched_rects,
         key=lambda rect: int(rect["index"]),
     )
     texture["m_Width"] = atlas_width
@@ -534,12 +585,17 @@ def patch_font_with_ttf(
         "new_texture_size": [atlas_width, atlas_height],
         "line_spacing": line_spacing,
         "pixel_height": pixel_height,
-        "added_codes": [glyph.code for glyph in glyphs],
-        "added_chars": "".join(chr(glyph.code) for glyph in glyphs),
+        "patched_codes": [glyph.code for glyph in glyphs],
+        "patched_chars": "".join(chr(glyph.code) for glyph in glyphs),
+        "cp1251_alias_codes": [glyph.code for glyph in glyphs if glyph.render_code != glyph.code],
+        "added_codes": [glyph.code for glyph in glyphs if glyph.code not in existing_codes],
+        "replaced_codes": [glyph.code for glyph in glyphs if glyph.code in existing_codes],
+        "reused_slots": len(reused_positions),
+        "packed_slots": len(glyphs_to_pack),
     }
 
 
-def patch_missing_fonts_with_ttf(
+def patch_fonts_with_ttf(
     asset: Asset,
     fallback_ttf_path: Path | None,
     ttf_font_dir: Path | None,
@@ -556,9 +612,6 @@ def patch_missing_fonts_with_ttf(
             continue
 
         font = obj.read()._obj
-        if font_has_cyrillic(font):
-            continue
-
         font_name = font.get("m_Name", "")
         font_family = normalize_font_family(font_name)
         ttf_path = ttf_by_family.get(font_family) or fallback_ttf_path
@@ -570,7 +623,9 @@ def patch_missing_fonts_with_ttf(
         }
         try:
             if ttf_path is None:
-                raise ValueError(f"No TTF configured for font family {font_family!r}.")
+                report_base["skipped"] = "no_ttf_configured"
+                reports.append(report_base)
+                continue
             resolved_face = fallback_face if ttf_path == fallback_ttf_path and fallback_face else extract_ttf_family_name(ttf_path)
             report_base["ttf_face"] = resolved_face
             report = patch_font_with_ttf(
@@ -695,7 +750,7 @@ def main() -> int:
         asset.load()
         ttf_reports: list[dict[str, Any]] = []
         if args.ttf_font or args.ttf_font_dir:
-            ttf_reports = patch_missing_fonts_with_ttf(
+            ttf_reports = patch_fonts_with_ttf(
                 asset,
                 args.ttf_font,
                 args.ttf_font_dir,
@@ -739,7 +794,7 @@ def main() -> int:
 
     print(f"Font map entries: {len(font_map)}")
     if args.ttf_font or args.ttf_font_dir:
-        patched = sum(1 for item in ttf_reports if "error" not in item and item.get("added_codes"))
+        patched = sum(1 for item in ttf_reports if "error" not in item and item.get("patched_codes"))
         failed = sum(1 for item in ttf_reports if "error" in item)
         families = sorted({item.get("font_family") for item in ttf_reports if item.get("font_family")})
         print(f"TTF font families considered: {len(families)}")

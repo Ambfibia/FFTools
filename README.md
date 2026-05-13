@@ -131,6 +131,11 @@ builds\beta-20100104-ru
 
 There are two font modes.
 
+When replacement TTFs are configured, the patcher rasterizes the primary printable ASCII range
+(letters, digits, punctuation) and Russian glyphs from the replacement font into matching Unity
+bitmap font atlases. It also adds CP1251 byte-code aliases for Russian input fields used by the
+old Unity GUI. Other existing glyphs are preserved.
+
 A single fallback TTF can be stored as:
 
 ```text

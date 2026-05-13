@@ -403,7 +403,7 @@ static class FfPatchTool
             "  --table-data          export and patch TableData.resourceFile strings too\n" +
             "  --no-unity-assets     skip Unity TextAsset strings\n" +
             "  --no-table-data       skip TableData.resourceFile strings\n" +
-            "  --font-ttf <file>     copy TTF into the patch dir and use it for bitmap fonts missing Cyrillic\n" +
+            "  --font-ttf <file>     copy TTF into the patch dir and use it for GUI bitmap font glyphs\n" +
             "  <patch>\\fonts\\*.ttf  per-family fonts, e.g. fonts\\JEFFE.ttf for JEFFE___14/40/72\n" +
             "  --font-face <name>    override the Windows font face name for the TTF\n" +
             "  --regen-patch         with make-ru, export patch JSON again before building\n");
