@@ -44,6 +44,17 @@ static int Run(string[] args)
             return 0;
         }
 
+        if (command == "patch-unity-input")
+        {
+            if (args.Length < 2)
+                throw new ArgumentException("Usage: FfStringPatcher patch-unity-input <UnityEngine.dll> [--backup]");
+
+            var assemblyPath = Path.GetFullPath(args[1]);
+            var backup = args.Skip(2).Any(a => a.Equals("--backup", StringComparison.OrdinalIgnoreCase));
+            PatchUnityTextEditorInput(assemblyPath, backup);
+            return 0;
+        }
+
         // Backwards-compatible mode used by the original build script:
         // FfStringPatcher <extracted-unityweb-dir> <legacy-patch-json> [--backup]
         if (args.Length >= 2)
@@ -71,9 +82,141 @@ static void PrintUsage()
         "Usage:\n" +
         "  FfStringPatcher export <extracted-unityweb-dir> <translation-json> [--assembly <name>] [--merge <json>]\n" +
         "  FfStringPatcher apply  <extracted-unityweb-dir> <translation-json-or-patch-json> [--backup] [--allow-missing]\n" +
+        "  FfStringPatcher patch-unity-input <UnityEngine.dll> [--backup]\n" +
         "\n" +
         "Legacy:\n" +
         "  FfStringPatcher <extracted-unityweb-dir> <legacy-patch-json> [--backup]");
+}
+
+static void PatchUnityTextEditorInput(string assemblyPath, bool backup)
+{
+    if (!File.Exists(assemblyPath))
+        throw new FileNotFoundException("UnityEngine.dll was not found.", assemblyPath);
+
+    var resolverRoot = Path.GetDirectoryName(assemblyPath)!;
+    var resolver = BuildResolver(assemblyPath, resolverRoot);
+    var readerParameters = new ReaderParameters
+    {
+        AssemblyResolver = resolver,
+        InMemory = true,
+        ReadSymbols = false
+    };
+
+    using var assembly = AssemblyDefinition.ReadAssembly(assemblyPath, readerParameters);
+    var module = assembly.MainModule;
+    var textEditor = module.Types.FirstOrDefault(t => t.FullName == "UnityEngine.TextEditor")
+        ?? throw new InvalidOperationException($"{Path.GetFileName(assemblyPath)}: UnityEngine.TextEditor was not found.");
+    var insert = textEditor.Methods.FirstOrDefault(m =>
+        m.Name == "Insert"
+        && m.Parameters.Count == 1
+        && m.Parameters[0].ParameterType.MetadataType == MetadataType.Char)
+        ?? throw new InvalidOperationException($"{Path.GetFileName(assemblyPath)}: UnityEngine.TextEditor.Insert(char) was not found.");
+
+    var helper = EnsureRussianInputHelper(module);
+    if (CallsMethod(insert, helper))
+    {
+        Console.WriteLine($"{Path.GetFileName(assemblyPath)}: Unity TextEditor input patch is already present.");
+        return;
+    }
+
+    var il = insert.Body.GetILProcessor();
+    var first = insert.Body.Instructions.First();
+    il.InsertBefore(first, il.Create(OpCodes.Ldarg_1));
+    il.InsertBefore(first, il.Create(OpCodes.Call, helper));
+    il.InsertBefore(first, il.Create(OpCodes.Starg_S, insert.Parameters[0]));
+    insert.Body.InitLocals = true;
+
+    WriteAssembly(assembly, assemblyPath, backup);
+    Console.WriteLine($"{Path.GetFileName(assemblyPath)}: patched UnityEngine.TextEditor.Insert(char) for Russian input aliases.");
+}
+
+static MethodDefinition EnsureRussianInputHelper(ModuleDefinition module)
+{
+    const string typeName = "UnityEngine.FFToolsRussianInput";
+    var existingType = module.Types.FirstOrDefault(t => t.FullName == typeName);
+    var existingMethod = existingType?.Methods.FirstOrDefault(m => m.Name == "NormalizeChar");
+    if (existingMethod is not null)
+        return existingMethod;
+
+    var charType = module.TypeSystem.Char;
+    var type = existingType ?? new TypeDefinition(
+        "UnityEngine",
+        "FFToolsRussianInput",
+        TypeAttributes.NotPublic | TypeAttributes.Abstract | TypeAttributes.Sealed | TypeAttributes.BeforeFieldInit,
+        module.TypeSystem.Object);
+    if (existingType is null)
+        module.Types.Add(type);
+
+    var method = new MethodDefinition(
+        "NormalizeChar",
+        MethodAttributes.Assembly | MethodAttributes.Static | MethodAttributes.HideBySig,
+        charType);
+    method.Parameters.Add(new ParameterDefinition("ch", ParameterAttributes.None, charType));
+    type.Methods.Add(method);
+
+    var il = method.Body.GetILProcessor();
+    var yoLowerCheck = il.Create(OpCodes.Ldarg_0);
+    var upperCheck = il.Create(OpCodes.Ldarg_0);
+    var lowerCheck = il.Create(OpCodes.Ldarg_0);
+    var retOriginal = il.Create(OpCodes.Ldarg_0);
+
+    il.Append(il.Create(OpCodes.Ldarg_0));
+    il.Append(il.Create(OpCodes.Ldc_I4, 0xA8));
+    il.Append(il.Create(OpCodes.Bne_Un_S, yoLowerCheck));
+    il.Append(il.Create(OpCodes.Ldc_I4, 0x0401));
+    il.Append(il.Create(OpCodes.Conv_U2));
+    il.Append(il.Create(OpCodes.Ret));
+
+    il.Append(yoLowerCheck);
+    il.Append(il.Create(OpCodes.Ldc_I4, 0xB8));
+    il.Append(il.Create(OpCodes.Bne_Un_S, upperCheck));
+    il.Append(il.Create(OpCodes.Ldc_I4, 0x0451));
+    il.Append(il.Create(OpCodes.Conv_U2));
+    il.Append(il.Create(OpCodes.Ret));
+
+    il.Append(upperCheck);
+    il.Append(il.Create(OpCodes.Ldc_I4, 0xC0));
+    il.Append(il.Create(OpCodes.Blt_S, retOriginal));
+    il.Append(il.Create(OpCodes.Ldarg_0));
+    il.Append(il.Create(OpCodes.Ldc_I4, 0xDF));
+    il.Append(il.Create(OpCodes.Bgt_S, lowerCheck));
+    il.Append(il.Create(OpCodes.Ldarg_0));
+    il.Append(il.Create(OpCodes.Ldc_I4, 0xC0));
+    il.Append(il.Create(OpCodes.Sub));
+    il.Append(il.Create(OpCodes.Ldc_I4, 0x0410));
+    il.Append(il.Create(OpCodes.Add));
+    il.Append(il.Create(OpCodes.Conv_U2));
+    il.Append(il.Create(OpCodes.Ret));
+
+    il.Append(lowerCheck);
+    il.Append(il.Create(OpCodes.Ldc_I4, 0xE0));
+    il.Append(il.Create(OpCodes.Blt_S, retOriginal));
+    il.Append(il.Create(OpCodes.Ldarg_0));
+    il.Append(il.Create(OpCodes.Ldc_I4, 0xFF));
+    il.Append(il.Create(OpCodes.Bgt_S, retOriginal));
+    il.Append(il.Create(OpCodes.Ldarg_0));
+    il.Append(il.Create(OpCodes.Ldc_I4, 0xE0));
+    il.Append(il.Create(OpCodes.Sub));
+    il.Append(il.Create(OpCodes.Ldc_I4, 0x0430));
+    il.Append(il.Create(OpCodes.Add));
+    il.Append(il.Create(OpCodes.Conv_U2));
+    il.Append(il.Create(OpCodes.Ret));
+
+    il.Append(retOriginal);
+    il.Append(il.Create(OpCodes.Ret));
+
+    return method;
+}
+
+static bool CallsMethod(MethodDefinition method, MethodReference target)
+{
+    if (!method.HasBody)
+        return false;
+
+    return method.Body.Instructions.Any(instruction =>
+        instruction.OpCode == OpCodes.Call
+        && instruction.Operand is MethodReference reference
+        && reference.FullName == target.FullName);
 }
 
 static void ExportTranslations(string root, string outputPath, ExportOptions options)
