@@ -159,6 +159,8 @@ static class FfPatchTool
             psArgs.Add("-NoFontPatch");
         if (args.Flag("no-font-reference-redirect"))
             psArgs.Add("-NoFontReferenceRedirect");
+        if (args.Flag("allow-texture-resize") || config.AllowTextureResize)
+            psArgs.Add("-AllowTextureResize");
         if (fontTtf is not null)
         {
             psArgs.Add("-FontTtf");
@@ -406,6 +408,7 @@ static class FfPatchTool
             "  --font-ttf <file>     copy TTF into the patch dir and use it for GUI bitmap font glyphs\n" +
             "  <patch>\\fonts\\*.ttf  per-family fonts, e.g. fonts\\JEFFE.ttf for JEFFE___14/40/72\n" +
             "  --font-face <name>    override the Windows font face name for the TTF\n" +
+            "  --allow-texture-resize resize replacement PNGs to their Unity Texture2D slot dimensions\n" +
             "  --regen-patch         with make-ru, export patch JSON again before building\n");
     }
 }
@@ -422,6 +425,7 @@ sealed class PatchConfig
     public bool IncludeTableData { get; set; } = true;
     public bool PatchUnityAssets { get; set; } = true;
     public bool PatchTableData { get; set; } = true;
+    public bool AllowTextureResize { get; set; } = false;
     public string AssetUrl { get; set; } = "http://127.0.0.1:8000";
     public string? OutputName { get; set; }
 }

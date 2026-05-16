@@ -46,6 +46,10 @@ MANUAL_FONT_FALLBACKS = {
     "JEFFE___72": "JEFFE___40",
 }
 
+FONT_VERTICAL_OFFSETS = {
+    "JEFFE": 2.0,
+}
+
 
 def normalize_font_family(name: str) -> str:
     normalized = name.strip()
@@ -391,17 +395,21 @@ def make_character_rect(
     atlas_width: int,
     atlas_height: int,
     line_spacing: float,
+    vertical_offset: float = 0.0,
 ) -> FFOrderedDict:
     rect = FFOrderedDict()
     rect["index"] = code
     rect["uv"] = FFOrderedDict()
     rect["vert"] = FFOrderedDict()
     set_rect_uv(rect, x, y, glyph.width, glyph.height, atlas_width, atlas_height)
-    rect["vert"]["x"] = float(glyph.origin_x)
-    rect["vert"]["y"] = -max(0.0, float(line_spacing) - float(glyph.origin_y))
+    vert_x = max(0, int(glyph.origin_x))
+    ink_right = vert_x + int(glyph.width)
+    advance = max(int(glyph.advance), ink_right)
+    rect["vert"]["x"] = float(vert_x)
+    rect["vert"]["y"] = -max(0.0, float(line_spacing) - float(glyph.origin_y)) + float(vertical_offset)
     rect["vert"]["width"] = float(glyph.width)
     rect["vert"]["height"] = -float(glyph.height)
-    rect["width"] = float(max(glyph.advance, glyph.width))
+    rect["width"] = float(advance)
     return rect
 
 
@@ -448,6 +456,7 @@ def patch_font_with_ttf(
     size_scale: float,
     padding: int,
     max_texture_size: int,
+    replace_ascii: bool,
 ) -> dict[str, Any]:
     font = asset.objects[font_path_id].contents._obj
     texture_pointer = font.get("m_Texture")
@@ -460,12 +469,14 @@ def patch_font_with_ttf(
     logical = texture_to_logical_alpha(texture)
 
     existing_rects = font.get("m_CharacterRects", [])
-    patch_codes = DEFAULT_TTF_PATCH_CODES
+    patch_codes = DEFAULT_TTF_PATCH_CODES if replace_ascii else RUSSIAN_CODES + sorted(CP1251_RUSSIAN_ALIASES)
     patch_code_set = set(patch_codes)
     existing_rect_by_code = {int(rect["index"]): rect for rect in existing_rects}
     existing_codes = set(existing_rect_by_code)
 
     line_spacing = float(font.get("m_LineSpacing") or 16.0)
+    font_family = normalize_font_family(font.get("m_Name", ""))
+    vertical_offset = FONT_VERTICAL_OFFSETS.get(font_family, 0.0)
     pixel_height = max(1, int(round(line_spacing * size_scale)))
     with GdiFontRenderer(ttf_path, face_name, pixel_height) as renderer:
         glyphs = []
@@ -562,6 +573,7 @@ def patch_font_with_ttf(
                 atlas_width,
                 atlas_height,
                 line_spacing,
+                vertical_offset,
             )
         )
 
@@ -584,6 +596,7 @@ def patch_font_with_ttf(
         "old_texture_size": [old_width, old_height],
         "new_texture_size": [atlas_width, atlas_height],
         "line_spacing": line_spacing,
+        "vertical_offset": vertical_offset,
         "pixel_height": pixel_height,
         "patched_codes": [glyph.code for glyph in glyphs],
         "patched_chars": "".join(chr(glyph.code) for glyph in glyphs),
@@ -603,6 +616,7 @@ def patch_fonts_with_ttf(
     size_scale: float,
     padding: int,
     max_texture_size: int,
+    replace_ascii: bool,
 ) -> list[dict[str, Any]]:
     ttf_by_family = build_ttf_font_map(ttf_font_dir)
     fallback_face = face_name or (extract_ttf_family_name(fallback_ttf_path) if fallback_ttf_path else None)
@@ -636,6 +650,7 @@ def patch_fonts_with_ttf(
                 size_scale,
                 padding,
                 max_texture_size,
+                replace_ascii,
             )
             report.update(report_base)
             reports.append(report)
@@ -742,6 +757,7 @@ def main() -> int:
     parser.add_argument("--font-size-scale", type=float, default=1.0)
     parser.add_argument("--glyph-padding", type=int, default=2)
     parser.add_argument("--max-texture-size", type=int, default=4096)
+    parser.add_argument("--preserve-ascii-glyphs", action="store_true", help="Only add Cyrillic and CP1251 aliases; leave existing ASCII glyphs unchanged.")
     parser.add_argument("--no-reference-redirect", action="store_true")
     args = parser.parse_args()
 
@@ -758,6 +774,7 @@ def main() -> int:
                 args.font_size_scale,
                 args.glyph_padding,
                 args.max_texture_size,
+                not args.preserve_ascii_glyphs,
             )
 
         font_map, font_info = build_font_map(asset)
@@ -775,6 +792,7 @@ def main() -> int:
         "output_asset": str(args.output_asset),
         "ttf_font": str(args.ttf_font) if args.ttf_font else None,
         "ttf_font_dir": str(args.ttf_font_dir) if args.ttf_font_dir else None,
+        "replace_ascii_glyphs": not args.preserve_ascii_glyphs,
         "ttf_patch": ttf_reports,
         "font_map": {
             str(old): {

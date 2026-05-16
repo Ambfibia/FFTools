@@ -44,14 +44,14 @@ static int Run(string[] args)
             return 0;
         }
 
-        if (command == "patch-unity-input")
+        if (command is "patch-unity-input" or "patch-unity-input-log")
         {
             if (args.Length < 2)
                 throw new ArgumentException("Usage: FfStringPatcher patch-unity-input <UnityEngine.dll> [--backup]");
 
             var assemblyPath = Path.GetFullPath(args[1]);
             var backup = args.Skip(2).Any(a => a.Equals("--backup", StringComparison.OrdinalIgnoreCase));
-            PatchUnityTextEditorInput(assemblyPath, backup);
+            PatchUnityTextEditorInput(assemblyPath, backup, logInput: command == "patch-unity-input-log");
             return 0;
         }
 
@@ -83,12 +83,13 @@ static void PrintUsage()
         "  FfStringPatcher export <extracted-unityweb-dir> <translation-json> [--assembly <name>] [--merge <json>]\n" +
         "  FfStringPatcher apply  <extracted-unityweb-dir> <translation-json-or-patch-json> [--backup] [--allow-missing]\n" +
         "  FfStringPatcher patch-unity-input <UnityEngine.dll> [--backup]\n" +
+        "  FfStringPatcher patch-unity-input-log <UnityEngine.dll> [--backup]\n" +
         "\n" +
         "Legacy:\n" +
         "  FfStringPatcher <extracted-unityweb-dir> <legacy-patch-json> [--backup]");
 }
 
-static void PatchUnityTextEditorInput(string assemblyPath, bool backup)
+static void PatchUnityTextEditorInput(string assemblyPath, bool backup, bool logInput)
 {
     if (!File.Exists(assemblyPath))
         throw new FileNotFoundException("UnityEngine.dll was not found.", assemblyPath);
@@ -112,22 +113,102 @@ static void PatchUnityTextEditorInput(string assemblyPath, bool backup)
         && m.Parameters[0].ParameterType.MetadataType == MetadataType.Char)
         ?? throw new InvalidOperationException($"{Path.GetFileName(assemblyPath)}: UnityEngine.TextEditor.Insert(char) was not found.");
 
+    var changed = false;
     var helper = EnsureRussianInputHelper(module);
-    if (CallsMethod(insert, helper))
+    var il = insert.Body.GetILProcessor();
+    var first = insert.Body.Instructions.First();
+    if (logInput)
+    {
+        var logHelper = EnsureRussianInputLogHelper(module);
+        if (!CallsMethod(insert, logHelper))
+        {
+            il.InsertBefore(first, il.Create(OpCodes.Ldarg_1));
+            il.InsertBefore(first, il.Create(OpCodes.Call, logHelper));
+            changed = true;
+        }
+    }
+
+    if (!CallsMethod(insert, helper))
+    {
+        il.InsertBefore(first, il.Create(OpCodes.Ldarg_1));
+        il.InsertBefore(first, il.Create(OpCodes.Call, helper));
+        il.InsertBefore(first, il.Create(OpCodes.Starg_S, insert.Parameters[0]));
+        changed = true;
+    }
+
+    if (!changed)
     {
         Console.WriteLine($"{Path.GetFileName(assemblyPath)}: Unity TextEditor input patch is already present.");
         return;
     }
 
-    var il = insert.Body.GetILProcessor();
-    var first = insert.Body.Instructions.First();
-    il.InsertBefore(first, il.Create(OpCodes.Ldarg_1));
-    il.InsertBefore(first, il.Create(OpCodes.Call, helper));
-    il.InsertBefore(first, il.Create(OpCodes.Starg_S, insert.Parameters[0]));
     insert.Body.InitLocals = true;
 
     WriteAssembly(assembly, assemblyPath, backup);
-    Console.WriteLine($"{Path.GetFileName(assemblyPath)}: patched UnityEngine.TextEditor.Insert(char) for Russian input aliases.");
+    Console.WriteLine($"{Path.GetFileName(assemblyPath)}: patched UnityEngine.TextEditor.Insert(char) for Russian input aliases{(logInput ? " and input logging" : "")}.");
+}
+
+static MethodDefinition EnsureRussianInputLogHelper(ModuleDefinition module)
+{
+    const string typeName = "UnityEngine.FFToolsRussianInput";
+    var type = module.Types.FirstOrDefault(t => t.FullName == typeName)
+        ?? new TypeDefinition(
+            "UnityEngine",
+            "FFToolsRussianInput",
+            TypeAttributes.NotPublic | TypeAttributes.Abstract | TypeAttributes.Sealed | TypeAttributes.BeforeFieldInit,
+            module.TypeSystem.Object);
+    if (!module.Types.Contains(type))
+        module.Types.Add(type);
+
+    var existingMethod = type.Methods.FirstOrDefault(m => m.Name == "LogChar");
+    if (existingMethod is not null)
+        return existingMethod;
+
+    var method = new MethodDefinition(
+        "LogChar",
+        MethodAttributes.Assembly | MethodAttributes.Static | MethodAttributes.HideBySig,
+        module.TypeSystem.Void);
+    method.Parameters.Add(new ParameterDefinition("ch", ParameterAttributes.None, module.TypeSystem.Char));
+    type.Methods.Add(method);
+
+    var pathCombine = module.ImportReference(typeof(Path).GetMethod(nameof(Path.Combine), new[] { typeof(string), typeof(string) })!);
+    var getTempPath = module.ImportReference(typeof(Path).GetMethod(nameof(Path.GetTempPath), Type.EmptyTypes)!);
+    var appendAllText = module.ImportReference(typeof(File).GetMethod(nameof(File.AppendAllText), new[] { typeof(string), typeof(string) })!);
+    var concat3 = module.ImportReference(typeof(string).GetMethod(nameof(string.Concat), new[] { typeof(string), typeof(string), typeof(string) })!);
+    var objectToString = module.ImportReference(typeof(object).GetMethod(nameof(ToString), Type.EmptyTypes)!);
+    var exceptionType = module.ImportReference(typeof(Exception));
+
+    var il = method.Body.GetILProcessor();
+    var tryStart = il.Create(OpCodes.Call, getTempPath);
+    var handlerStart = il.Create(OpCodes.Pop);
+    var ret = il.Create(OpCodes.Ret);
+
+    il.Append(tryStart);
+    il.Append(il.Create(OpCodes.Ldstr, "fftools_input_chars.log"));
+    il.Append(il.Create(OpCodes.Call, pathCombine));
+    il.Append(il.Create(OpCodes.Ldstr, "IN "));
+    il.Append(il.Create(OpCodes.Ldarg_0));
+    il.Append(il.Create(OpCodes.Conv_I4));
+    il.Append(il.Create(OpCodes.Box, module.TypeSystem.Int32));
+    il.Append(il.Create(OpCodes.Callvirt, objectToString));
+    il.Append(il.Create(OpCodes.Ldstr, "\n"));
+    il.Append(il.Create(OpCodes.Call, concat3));
+    il.Append(il.Create(OpCodes.Call, appendAllText));
+    il.Append(il.Create(OpCodes.Leave_S, ret));
+    il.Append(handlerStart);
+    il.Append(il.Create(OpCodes.Leave_S, ret));
+    il.Append(ret);
+
+    method.Body.ExceptionHandlers.Add(new ExceptionHandler(ExceptionHandlerType.Catch)
+    {
+        TryStart = tryStart,
+        TryEnd = handlerStart,
+        HandlerStart = handlerStart,
+        HandlerEnd = ret,
+        CatchType = exceptionType
+    });
+
+    return method;
 }
 
 static MethodDefinition EnsureRussianInputHelper(ModuleDefinition module)
@@ -361,8 +442,32 @@ static bool ShouldExport(string source, TypeDefinition type, MethodDefinition me
         return false;
     if (!options.IncludeControlChars && source.Any(ch => char.IsControl(ch) && ch is not '\r' and not '\n' and not '\t'))
         return false;
+    if (!ContainsOnlyLatinOrCyrillicLetters(source))
+        return false;
     if (options.UiOnly && !IsUiString(type.FullName, method.FullName, source))
         return false;
+    return true;
+}
+
+static bool ContainsOnlyLatinOrCyrillicLetters(string source)
+{
+    foreach (var ch in source)
+    {
+        if (!char.IsLetter(ch))
+            continue;
+
+        var code = ch;
+        if (code is >= '\u0041' and <= '\u007A'
+            or >= '\u00C0' and <= '\u024F'
+            or >= '\u1E00' and <= '\u1EFF'
+            or >= '\u0400' and <= '\u052F'
+            or >= '\u2DE0' and <= '\u2DFF'
+            or >= '\uA640' and <= '\uA69F')
+            continue;
+
+        return false;
+    }
+
     return true;
 }
 

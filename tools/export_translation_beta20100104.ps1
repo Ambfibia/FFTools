@@ -28,7 +28,7 @@ if ($MergeJson -eq "") {
 $ClientDir = Resolve-Path $ClientDir
 $OutFileFull = [System.IO.Path]::GetFullPath($OutFile)
 $MergeJsonFull = [System.IO.Path]::GetFullPath($MergeJson)
-$Python = "C:\msys64\mingw32\bin\python.exe"
+$Python = if ($env:PYTHON -ne $null -and $env:PYTHON -ne "") { $env:PYTHON } else { "C:\msys64\mingw32\bin\python.exe" }
 $FfBuildToolProject = Join-Path $RepoRoot "ffbuildtool\Cargo.toml"
 $FfBuildToolSource = Join-Path $RepoRoot "ffbuildtool\src\bundle.rs"
 $FfBuildToolExe = Join-Path $RepoRoot "ffbuildtool\target\debug\ffbuildtool.exe"
@@ -39,7 +39,7 @@ $UnityTranslationTool = Join-Path $RepoRoot "tools\ff_text_asset_translations.py
 $LogDir = Join-Path $RepoRoot "logs\translation_export"
 $LogPath = Join-Path $LogDir ("export_beta20100104_" + (Get-Date -Format "yyyyMMdd_HHmmss") + ".log")
 $TempRoot = Join-Path (Join-Path $RepoRoot "work") ("main_export_" + [guid]::NewGuid().ToString("N"))
-$TableTempRoot = Join-Path (Join-Path $RepoRoot "work") ("tabledata_export_" + [guid]::NewGuid().ToString("N"))
+$BundleTempRoot = Join-Path (Join-Path $RepoRoot "work") ("bundle_export_" + [guid]::NewGuid().ToString("N"))
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
@@ -73,6 +73,49 @@ function Invoke-LoggedStep {
     if ($ExitCode -ne 0) {
         throw "$Name failed with exit code $ExitCode"
     }
+}
+
+function Get-UnityAssetFiles {
+    param([string]$ExtractDir)
+
+    return @(Get-ChildItem -LiteralPath $ExtractDir -File |
+        Where-Object {
+            $_.Extension -ne ".dll" -and
+            $_.Name -ne "mainData" -and
+            $_.Name -ne "manifest.json"
+        } |
+        Sort-Object Name)
+}
+
+function Export-UnityAssetStrings {
+    param(
+        [string]$ExtractDir,
+        [string]$ContainerName,
+        [string[]]$MergeArgs
+    )
+
+    $AssetFiles = Get-UnityAssetFiles -ExtractDir $ExtractDir
+    if ($AssetFiles.Count -eq 0) {
+        Write-LogLine "No Unity asset files found in $ContainerName"
+        return
+    }
+
+    $ExportArgs = @(
+        $UnityTranslationTool,
+        "export",
+        $ExtractDir,
+        $OutFileFull,
+        "--container",
+        $ContainerName,
+        "--object-strings",
+        "--allow-invalid-asset"
+    ) + $MergeArgs
+
+    foreach ($AssetFile in $AssetFiles) {
+        $ExportArgs += @("--asset", $AssetFile.Name)
+    }
+
+    Invoke-LoggedStep "Export Unity asset strings from $ContainerName" $Python $ExportArgs
 }
 
 Set-Content -Path $LogPath -Value ("Translation export started " + (Get-Date -Format "s")) -Encoding UTF8
@@ -157,46 +200,41 @@ try {
     }
 
     if (-not $NoUnityAssets) {
-        $MainUnityExportArgs = @(
-            $UnityTranslationTool,
-            "export",
-            $TempRoot,
-            $OutFileFull,
-            "--asset",
-            "sharedassets0.assets",
-            "--container",
-            "main.unity3d"
-        ) + $UnityMergeArgs
-        Invoke-LoggedStep "Export main Unity asset strings" $Python $MainUnityExportArgs
+        Export-UnityAssetStrings -ExtractDir $TempRoot -ContainerName "main.unity3d" -MergeArgs $UnityMergeArgs
     }
 
-    if (-not $NoTableData) {
-        New-Item -ItemType Directory -Force -Path $TableTempRoot | Out-Null
-        Invoke-LoggedStep "Extract TableData.resourceFile with ffbuildtool" $FfBuildToolExe @(
+    New-Item -ItemType Directory -Force -Path $BundleTempRoot | Out-Null
+    $Containers = Get-ChildItem -LiteralPath $ClientDir -File |
+        Where-Object {
+            ($_.Name.EndsWith(".unity3d", [System.StringComparison]::OrdinalIgnoreCase) -or
+             $_.Name.EndsWith(".resourceFile", [System.StringComparison]::OrdinalIgnoreCase)) -and
+            ($_.Name -notlike "*.bak*") -and
+            (-not [string]::Equals($_.Name, "main.unity3d", [System.StringComparison]::OrdinalIgnoreCase))
+        } |
+        Sort-Object Name
+
+    foreach ($Container in $Containers) {
+        $IsTableData = [string]::Equals($Container.Name, "TableData.resourceFile", [System.StringComparison]::OrdinalIgnoreCase)
+        if ($IsTableData) {
+            if ($NoTableData) {
+                Write-LogLine "Skipping TableData.resourceFile because -NoTableData was set"
+                continue
+            }
+        }
+        elseif ($NoUnityAssets) {
+            continue
+        }
+
+        $ContainerExtractDir = Join-Path $BundleTempRoot ([guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Force -Path $ContainerExtractDir | Out-Null
+        Invoke-LoggedStep "Extract $($Container.Name) with ffbuildtool" $FfBuildToolExe @(
             "extract-bundle",
             "-i",
-            (Join-Path $ClientDir "TableData.resourceFile"),
+            $Container.FullName,
             "-o",
-            $TableTempRoot
+            $ContainerExtractDir
         )
-        $TableAssetFile = Get-ChildItem -LiteralPath $TableTempRoot -File |
-            Where-Object { -not $_.Name.StartsWith(".") } |
-            Select-Object -First 1
-        if ($null -eq $TableAssetFile) {
-            throw "TableData.resourceFile extraction produced no asset file."
-        }
-        $TableDataExportArgs = @(
-            $UnityTranslationTool,
-            "export",
-            $TableTempRoot,
-            $OutFileFull,
-            "--asset",
-            $TableAssetFile.Name,
-            "--container",
-            "TableData.resourceFile",
-            "--object-strings"
-        ) + $UnityMergeArgs
-        Invoke-LoggedStep "Export TableData strings" $Python $TableDataExportArgs
+        Export-UnityAssetStrings -ExtractDir $ContainerExtractDir -ContainerName $Container.Name -MergeArgs $UnityMergeArgs
     }
 
     Write-LogLine "Translation JSON written to $OutFileFull"
@@ -206,7 +244,7 @@ finally {
     if (Test-Path $TempRoot) {
         Remove-Item -LiteralPath $TempRoot -Recurse -Force
     }
-    if (Test-Path $TableTempRoot) {
-        Remove-Item -LiteralPath $TableTempRoot -Recurse -Force
+    if (Test-Path $BundleTempRoot) {
+        Remove-Item -LiteralPath $BundleTempRoot -Recurse -Force
     }
 }

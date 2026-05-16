@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import sys
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -47,9 +48,21 @@ LOCALIZABLE_PATH_HINTS = (
     "SceneData",
     "BlackFilterData",
     "WhiteFilterData",
+    "GUILanguageData",
 )
 
 SKIP_SOURCE_VALUES = {"", "0", "-1", "null", "none"}
+
+
+def is_latin_or_cyrillic_letter(char: str) -> bool:
+    if not char.isalpha():
+        return True
+    name = unicodedata.name(char, "")
+    return name.startswith("LATIN ") or name.startswith("CYRILLIC ")
+
+
+def contains_only_latin_or_cyrillic_letters(value: str) -> bool:
+    return all(is_latin_or_cyrillic_letter(char) for char in value)
 
 
 def load_spec(path: Path) -> dict[str, Any]:
@@ -67,18 +80,25 @@ def save_spec(path: Path, spec: dict[str, Any]) -> None:
     path.write_text(json.dumps(spec, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def save_status(path: Path | None, **values: Any) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(values, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
 def sha1_text(value: str) -> str:
     return hashlib.sha1(value.encode("utf-8")).hexdigest()
 
 
-def text_asset_entry_id(file_name: str, path_id: int, source: str) -> str:
-    digest = sha1_text(f"{file_name}|{path_id}|{source}")[:16]
-    return f"{TEXT_ASSET_KIND}:{file_name}:{path_id}:{digest}"
+def text_asset_entry_id(container: str, file_name: str, path_id: int, source: str) -> str:
+    digest = sha1_text(f"{container}|{file_name}|{path_id}|{source}")[:16]
+    return f"{TEXT_ASSET_KIND}:{container}:{file_name}:{path_id}:{digest}"
 
 
-def object_string_entry_id(file_name: str, path_id: int, field_path: str, source: str) -> str:
-    digest = sha1_text(f"{file_name}|{path_id}|{field_path}|{source}")[:16]
-    return f"{OBJECT_STRING_KIND}:{file_name}:{path_id}:{digest}"
+def object_string_entry_id(container: str, file_name: str, path_id: int, field_path: str, source: str) -> str:
+    digest = sha1_text(f"{container}|{file_name}|{path_id}|{field_path}|{source}")[:16]
+    return f"{OBJECT_STRING_KIND}:{container}:{file_name}:{path_id}:{digest}"
 
 
 def has_text(value: Any) -> bool:
@@ -92,6 +112,8 @@ def normalize_asset_name(name: str) -> str:
 class Merge:
     def __init__(self) -> None:
         self.by_id: dict[str, str] = {}
+        self.by_container_file_path_source: dict[tuple[str, str, int, str], str] = {}
+        self.by_container_file_field_source: dict[tuple[str, str, int, str, str], str] = {}
         self.by_file_path_source: dict[tuple[str, int, str], str] = {}
         self.by_file_field_source: dict[tuple[str, int, str, str], str] = {}
         self.by_file_name_source: dict[tuple[str, str, str], str] = {}
@@ -111,10 +133,17 @@ class Merge:
                 self.by_id[entry_id_value] = translation
 
             file_name = entry.get("file")
+            container = entry.get("container")
             path_id = entry.get("pathId")
             field_path = entry.get("fieldPath")
             name = entry.get("name") or entry.get("objectName")
             if isinstance(file_name, str) and isinstance(path_id, int):
+                if isinstance(container, str):
+                    self.by_container_file_path_source[(container, file_name, path_id, source)] = translation
+                    if isinstance(field_path, str):
+                        self.by_container_file_field_source[
+                            (container, file_name, path_id, field_path, source)
+                        ] = translation
                 self.by_file_path_source[(file_name, path_id, source)] = translation
                 if isinstance(field_path, str):
                     self.by_file_field_source[(file_name, path_id, field_path, source)] = translation
@@ -129,6 +158,7 @@ class Merge:
     def find(self, entry: dict[str, Any]) -> str:
         entry_id_value = entry["id"]
         file_name = entry["file"]
+        container = entry.get("container")
         path_id = entry["pathId"]
         source = entry["source"]
 
@@ -136,6 +166,16 @@ class Merge:
             return self.by_id[entry_id_value]
 
         field_path = entry.get("fieldPath")
+        if isinstance(container, str) and isinstance(field_path, str):
+            key_container_field = (container, file_name, path_id, field_path, source)
+            if key_container_field in self.by_container_file_field_source:
+                return self.by_container_file_field_source[key_container_field]
+
+        if isinstance(container, str):
+            key_container_path = (container, file_name, path_id, source)
+            if key_container_path in self.by_container_file_path_source:
+                return self.by_container_file_path_source[key_container_path]
+
         if isinstance(field_path, str):
             key_field = (file_name, path_id, field_path, source)
             if key_field in self.by_file_field_source:
@@ -177,14 +217,25 @@ def close_asset(asset: Asset) -> None:
         handle.close()
 
 
-def text_asset_entries(root: Path, asset_names: list[str], merge: Merge, container: str) -> list[dict[str, Any]]:
+def text_asset_entries(
+    root: Path,
+    asset_names: list[str],
+    merge: Merge,
+    container: str,
+    allow_invalid_asset: bool,
+) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     for asset_name in asset_names:
         asset_path = root / asset_name
         if not asset_path.exists():
             continue
 
-        asset = read_asset(asset_path)
+        try:
+            asset = read_asset(asset_path)
+        except Exception:
+            if allow_invalid_asset:
+                continue
+            raise
         try:
             for path_id, obj in sorted(asset.objects.items()):
                 if obj.type_id != TEXT_ASSET_TYPE_ID:
@@ -193,9 +244,11 @@ def text_asset_entries(root: Path, asset_names: list[str], merge: Merge, contain
                 source = data.script
                 if not isinstance(source, str) or source.strip() == "":
                     continue
+                if not contains_only_latin_or_cyrillic_letters(source):
+                    continue
 
                 entry = {
-                    "id": text_asset_entry_id(asset_name, int(path_id), source),
+                    "id": text_asset_entry_id(container, asset_name, int(path_id), source),
                     "kind": TEXT_ASSET_KIND,
                     "container": container,
                     "file": asset_name,
@@ -262,6 +315,8 @@ def is_localizable_object_string(field_path: str, source: str, include_all: bool
     stripped = source.strip()
     if stripped.lower() in SKIP_SOURCE_VALUES:
         return False
+    if not contains_only_latin_or_cyrillic_letters(source):
+        return False
     if include_all:
         return True
     return any(hint in field_path for hint in LOCALIZABLE_PATH_HINTS)
@@ -273,6 +328,7 @@ def object_string_entries(
     merge: Merge,
     container: str,
     include_all: bool,
+    allow_invalid_asset: bool,
 ) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     for asset_name in asset_names:
@@ -280,7 +336,12 @@ def object_string_entries(
         if not asset_path.exists():
             continue
 
-        asset = read_asset(asset_path)
+        try:
+            asset = read_asset(asset_path)
+        except Exception:
+            if allow_invalid_asset:
+                continue
+            raise
         try:
             for path_id, obj in sorted(asset.objects.items()):
                 if obj.class_id != 114 or obj.type_id >= 0:
@@ -295,7 +356,7 @@ def object_string_entries(
                         continue
 
                     entry = {
-                        "id": object_string_entry_id(asset_name, int(path_id), field_path, source),
+                        "id": object_string_entry_id(container, asset_name, int(path_id), field_path, source),
                         "kind": OBJECT_STRING_KIND,
                         "container": container,
                         "file": asset_name,
@@ -326,13 +387,24 @@ def export_assets(args: argparse.Namespace) -> int:
     kept_entries = [
         entry
         for entry in spec.get("entries", [])
-        if not (entry.get("kind") in kinds and entry.get("file") in asset_names)
+        if not (
+            entry.get("kind") in kinds
+            and entry.get("file") in asset_names
+            and entry.get("container", "") == args.container
+        )
     ]
 
-    new_entries = text_asset_entries(args.root, asset_names, merge, args.container)
+    new_entries = text_asset_entries(args.root, asset_names, merge, args.container, args.allow_invalid_asset)
     if args.object_strings:
         new_entries.extend(
-            object_string_entries(args.root, asset_names, merge, args.container, args.all_object_strings)
+            object_string_entries(
+                args.root,
+                asset_names,
+                merge,
+                args.container,
+                args.all_object_strings,
+                args.allow_invalid_asset,
+            )
         )
 
     spec["entries"] = kept_entries + new_entries
@@ -398,8 +470,11 @@ def apply_assets(args: argparse.Namespace) -> int:
         for entry in spec.get("entries", [])
         if entry.get("kind") in {TEXT_ASSET_KIND, OBJECT_STRING_KIND} and has_text(entry.get("translation"))
     ]
+    if args.container != "":
+        entries = [entry for entry in entries if entry.get("container", "") == args.container]
     if not entries:
         print("No filled Unity asset translations to apply.")
+        save_status(args.status_file, applied=0)
         return 0
 
     total = 0
@@ -438,6 +513,7 @@ def apply_assets(args: argparse.Namespace) -> int:
         os.replace(temp_path, asset_path)
 
     print(f"Applied {total} Unity asset translations.")
+    save_status(args.status_file, applied=total)
     return 0
 
 
@@ -453,12 +529,15 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument("--merge", action="append", type=Path, default=[])
     export_parser.add_argument("--object-strings", action="store_true")
     export_parser.add_argument("--all-object-strings", action="store_true")
+    export_parser.add_argument("--allow-invalid-asset", action="store_true")
     export_parser.set_defaults(func=export_assets)
 
     apply_parser = subparsers.add_parser("apply")
     apply_parser.add_argument("root", type=Path)
     apply_parser.add_argument("translation_json", type=Path)
+    apply_parser.add_argument("--container", default="")
     apply_parser.add_argument("--allow-missing", action="store_true")
+    apply_parser.add_argument("--status-file", type=Path)
     apply_parser.set_defaults(func=apply_assets)
 
     return parser

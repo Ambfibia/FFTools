@@ -41,18 +41,17 @@ Install these tools on Windows:
 - MSYS2 with MinGW 32-bit Python at `C:\msys64\mingw32\bin\python.exe`.
 - Git for Windows.
 
-The Python path is currently hardcoded in the PowerShell scripts as:
+The PowerShell scripts use this Python by default:
 
 ```text
 C:\msys64\mingw32\bin\python.exe
 ```
 
-If Python is installed elsewhere, update `$Python` in:
-
-- `tools\build_ru_beta20100104.ps1`
-- `tools\export_translation_beta20100104.ps1`
+If Python is installed elsewhere, set the `PYTHON` environment variable before running the scripts.
+For texture PNG export/patching, set `TEXTURE_PYTHON` to a Python that has Pillow installed.
 
 TTF font patching uses Windows GDI through Python `ctypes`, so it does not require Pillow or fontTools.
+Texture PNG export/patching does require Pillow for the selected Python.
 
 ## Build Tools
 
@@ -155,6 +154,45 @@ Font file names are matched by normalized family name:
 - `ChaletBook-Regular.ttf` is used for `ChaletBook-Regular`, `ChaletBook-Regular Small`, and `ChaletBook-Regular Small 1`.
 
 If a per-family TTF is missing, the tool falls back to `font.ttf` when present.
+
+## Texture Replacement
+
+Some UI art has baked-in English text. Export candidate Texture2D images to PNG:
+
+```bat
+35_export_texture_pngs_gui.bat
+```
+
+The GUI asks for the source build folder, patch folder, and an optional texture name regex.
+It uses `TEXTURE_PYTHON` when set, otherwise it tries `work\texture_venv_win\Scripts\python.exe` before asking you to select `python.exe`.
+The CLI wrapper is also available:
+
+```bat
+35_export_texture_pngs.bat -ClientDir builds\beta-20100104 -NameRegex "help|title|button"
+```
+
+By default this scans all `.unity3d` and `.resourceFile` containers in the selected client folder and writes to:
+
+```text
+builds\beta-20100104-ru-patch\textures
+```
+
+PNG files are grouped by source container and asset file, for example:
+
+```text
+textures\main.unity3d\sharedassets0.assets\73__HelpTitle.png
+textures\Tutorial.resourceFile\CustomAssetBundle-...\123__SomeTexture.png
+```
+
+Edit the exported PNG files in place. During `30_ff_patch_tool.bat build`, the build script automatically applies edited
+PNGs when `textures\manifest.json` exists in the patch folder. Unchanged PNGs are skipped by hash.
+
+The lower-level tool is also available:
+
+```bat
+C:\msys64\mingw32\bin\python.exe tools\ff_texture_patch.py export work\extracted-main builds\beta-20100104-ru-patch\textures
+C:\msys64\mingw32\bin\python.exe tools\ff_texture_patch.py apply  work\extracted-main builds\beta-20100104-ru-patch\textures
+```
 
 ## CLI Workflow
 
